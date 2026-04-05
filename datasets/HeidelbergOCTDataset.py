@@ -72,7 +72,7 @@ class HeidelbergOCTDataset(Dataset):
         
         df = pd.read_csv(meta) if isinstance(meta, str) else meta
         self.paths = df[path_col_name].values
-        self.labels = df[label_name].values
+        
         
         self.num_slices = num_slices_to_use
         self.sparsing_method = sparsing_method

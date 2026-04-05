@@ -1,4 +1,5 @@
 dataset_name: heidelberg
-meta: ./meta/heidelberg.csv
+meta: ./mp.csv
+path_col: zarr_path
+pid_col: "root.AxisImageXMLInformation.Patient@PID"
 out_dir: ./results/mae
-fe_path: ./checkpoints/kermany/feature_extractor.pth
