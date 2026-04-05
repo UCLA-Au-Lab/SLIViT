@@ -62,6 +62,11 @@ class SLIViTMAE(nn.Module):
             spatial_dims=2,
         )
 
+    def _extract_features(self, x):
+        """Run ConvNeXt and handle both tuple and dict outputs."""
+        out = self.feature_extractor(x)
+        return out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
+
     def _patchify(self, feats):
         """
         Reshape feature map into per-slice patch vectors.
@@ -91,7 +96,7 @@ class SLIViTMAE(nn.Module):
             loss: scalar MSE loss on masked patch features
         """
         # Feature extraction (end-to-end)
-        feats = self.feature_extractor(x).last_hidden_state  # (B, 768, 8, N*8)
+        feats = self._extract_features(x)  # (B, 768, 8, N*8)
 
         # Reconstruction targets (stop gradient)
         targets = self._patchify(feats.detach())  # (B, N, 49152)
@@ -113,7 +118,7 @@ class SLIViTMAE(nn.Module):
         Returns:
             embeddings: (B, hidden_size)
         """
-        feats = self.feature_extractor(x).last_hidden_state  # (B, 768, 8, N*8)
+        feats = self._extract_features(x)  # (B, 768, 8, N*8)
 
         # Patch embedding (conv projection + positional embedding)
         tokens = self.mae.patch_embedding(feats)  # (B, N, hidden_size)
