@@ -13,20 +13,27 @@ CONVNEXT_CONFIGS = {
 
 class ConvNeXtFeatureExtractor(nn.Module):
     """
-    Wraps ConvNeXt embeddings + encoder into a single module that
-    returns a plain tensor (not a BaseModelOutput).
+    Wraps the DINOv3 ConvNeXt encoder (the stages ModuleList) into a
+    module that takes pixel input and returns a plain feature tensor.
+
+    DINOv3 model structure:
+        model.model = DINOv3ConvNextEncoder (contains model.model.stages)
+        model.layer_norm = LayerNorm (dropped)
+        model.pool = AdaptiveAvgPool2d (dropped)
     """
 
-    def __init__(self, embeddings, encoder):
+    def __init__(self, encoder):
         super().__init__()
-        self.embeddings = embeddings
         self.encoder = encoder
 
     def forward(self, x):
-        x = self.embeddings(x)
         out = self.encoder(x)
-        # Handle both BaseModelOutput and tuple returns
-        return out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
+        # Handle BaseModelOutput, tuple, or plain tensor
+        if hasattr(out, "last_hidden_state"):
+            return out.last_hidden_state
+        elif isinstance(out, tuple):
+            return out[0]
+        return out
 
 
 def get_feature_extractor(num_labels=4, pretrained_weights='', variant='base'):
@@ -44,9 +51,10 @@ def get_feature_extractor(num_labels=4, pretrained_weights='', variant='base'):
     cfg = CONVNEXT_CONFIGS[variant]
     model = AutoModel.from_pretrained(cfg["model"])
 
-    # Extract embeddings + encoder, drop final LayerNorm
-    children = list(model.children())
-    fe = ConvNeXtFeatureExtractor(children[0], children[1])
+    # DINOv3 structure: model.model = DINOv3ConvNextEncoder, model.layer_norm, model.pool
+    # We keep just the encoder (which contains the stages), drop LayerNorm and pool
+    encoder = list(model.children())[0]  # DINOv3ConvNextEncoder
+    fe = ConvNeXtFeatureExtractor(encoder)
 
     if pretrained_weights:
         fe.load_state_dict(torch.load(pretrained_weights, map_location=torch.device("cuda")))
