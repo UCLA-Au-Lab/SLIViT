@@ -63,9 +63,8 @@ class SLIViTMAE(nn.Module):
         )
 
     def _extract_features(self, x):
-        """Run ConvNeXt and handle both tuple and dict outputs."""
-        out = self.feature_extractor(x)
-        return out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
+        """Run ConvNeXt feature extractor."""
+        return self.feature_extractor(x)
 
     def _patchify(self, feats):
         """

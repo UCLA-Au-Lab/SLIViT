@@ -11,24 +11,22 @@ CONVNEXT_CONFIGS = {
 }
 
 
-class ConvNext(nn.Module):
-    def __init__(self, model):
-        super(ConvNext, self).__init__()
-        self.model = model
+class ConvNeXtFeatureExtractor(nn.Module):
+    """
+    Wraps ConvNeXt embeddings + encoder into a single module that
+    returns a plain tensor (not a BaseModelOutput).
+    """
 
-    def forward(self, x):
-        x = self.model(x)[0]
-        return x
-
-
-class CustomHuggingFaceModel(nn.Module):
-    def __init__(self, hugging_face_model):
+    def __init__(self, embeddings, encoder):
         super().__init__()
-        self.model = hugging_face_model
+        self.embeddings = embeddings
+        self.encoder = encoder
 
     def forward(self, x):
-        # Get logits from the Hugging Face model
-        return self.model(x).logits
+        x = self.embeddings(x)
+        out = self.encoder(x)
+        # Handle both BaseModelOutput and tuple returns
+        return out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
 
 
 def get_feature_extractor(num_labels=4, pretrained_weights='', variant='base'):
@@ -48,7 +46,7 @@ def get_feature_extractor(num_labels=4, pretrained_weights='', variant='base'):
 
     # Extract embeddings + encoder, drop final LayerNorm
     children = list(model.children())
-    fe = torch.nn.Sequential(*list(children)[:2])
+    fe = ConvNeXtFeatureExtractor(children[0], children[1])
 
     if pretrained_weights:
         fe.load_state_dict(torch.load(pretrained_weights, map_location=torch.device("cuda")))
