@@ -9,3 +9,4 @@ snippets/
 *.log
 results/
 wandb/
+scratch.*

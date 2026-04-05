@@ -1,0 +1,13 @@
+dataset_name: heidelberg
+meta: ./mp.csv
+path_col: zarr_path
+split_col: split
+out_dir: ./results/mae2d
+convnext_variant: base
+slices_per_volume: 4
+epochs: 4
+batch_size: 2
+warmup_epochs: 1
+patience: 4
+wandb_name: slivit-mae2d
+cpus: 4

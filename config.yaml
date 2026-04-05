@@ -7,4 +7,4 @@ wandb_name: slivit-mae
 epochs: 4
 patience: 4
 warmup_epochs: 1
-batch_size: 16
+batch_size: 32
