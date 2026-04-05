@@ -6,3 +6,4 @@ old*
 .gitignore
 snippets/
 *.csv
+*.log

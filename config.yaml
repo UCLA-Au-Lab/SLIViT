@@ -3,3 +3,4 @@ meta: ./mp.csv
 path_col: zarr_path
 pid_col: "root.AxisImageXMLInformation.Patient@PID"
 out_dir: ./results/mae
+# wandb_name: slivit-mae

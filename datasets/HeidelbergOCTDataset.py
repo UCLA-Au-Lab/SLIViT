@@ -112,7 +112,7 @@ class HeidelbergOCTDataset(Dataset):
         # from torchvision.transforms import ToTensor
         slices = []
         for i in indices:
-            img = vol[:, i, :, :]
+            img = vol[0, i, :, :]
             slices.append(self.transform(img))
             # Each slice is now (3, 256, 256)
 
