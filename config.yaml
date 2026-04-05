@@ -3,4 +3,8 @@ meta: ./mp.csv
 path_col: zarr_path
 pid_col: "root.AxisImageXMLInformation.Patient@PID"
 out_dir: ./results/mae
-# wandb_name: slivit-mae
+wandb_name: slivit-mae
+epochs: 4
+patience: 4
+warmup_epochs: 1
+batch_size: 16

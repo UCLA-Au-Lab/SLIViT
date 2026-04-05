@@ -7,3 +7,5 @@ old*
 snippets/
 *.csv
 *.log
+results/
+wandb/
