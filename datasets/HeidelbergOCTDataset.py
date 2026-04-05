@@ -79,7 +79,7 @@ class HeidelbergOCTDataset(Dataset):
         self.img_suffix = img_suffix
         self.transform = per_slice_transform
 
-        raise NotImplementedError("Fill in __init__ with your metadata loading logic")
+        # raise NotImplementedError("Fill in __init__ with your metadata loading logic")
 
     def __len__(self):
         return len(self.paths)
