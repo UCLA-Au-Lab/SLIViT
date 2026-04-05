@@ -49,6 +49,7 @@ DATASET_NAME_TO_CLASS = {
     "ct3d": "MedMNISTDataset3D",
     "custom3d": "CustomDataset3D",
     "heidelberg": "HeidelbergOCTDataset",
+    "heidelberg_2d": "HeidelbergOCTSliceDataset",
 }
 
 
@@ -145,36 +146,6 @@ def setup_ssl_dataloaders(args):
     return train_loader, val_loader
 
 
-# ---------------------------------------------------------------------------
-# SliceDataset — yields individual 2D slices from 3D volume datasets
-# ---------------------------------------------------------------------------
-
-class SliceDataset(Dataset):
-    """
-    Wraps a 3D volume dataset and yields individual 2D slices.
-
-    Each volume is (3, 256, 256*N) — N slices concatenated along width.
-    This dataset samples `slices_per_volume` random slices from each volume,
-    yielding (3, 256, 256) tensors.
-    """
-
-    def __init__(self, volume_dataset, slices_per_volume=10):
-        self.volume_dataset = volume_dataset
-        self.slices_per_volume = slices_per_volume
-
-    def __len__(self):
-        return len(self.volume_dataset) * self.slices_per_volume
-
-    def __getitem__(self, idx):
-        vol_idx = idx // self.slices_per_volume
-        volume, _ = self.volume_dataset[vol_idx]  # (3, 256, 256*N)
-        n_slices = volume.shape[-1] // 256
-        slice_idx = torch.randint(0, n_slices, (1,)).item()
-        start = slice_idx * 256
-        single_slice = volume[:, :, start:start + 256]  # (3, 256, 256)
-        return single_slice, torch.tensor(0.0)
-
-
 def setup_ssl_2d_dataloaders(args):
     """Build train/val DataLoaders that yield individual 2D slices for Stage 1."""
     dataset_class = get_dataset_class(args.dataset_name)
@@ -184,22 +155,32 @@ def setup_ssl_2d_dataloaders(args):
         args.meta, args.out_dir, args.split_ratio, label, args.split_col, args.pid_col
     )
 
-    volume_dataset = dataset_class(
+    slices_per_vol = getattr(args, "slices_per_volume", 10)
+
+    # Build dataset — HeidelbergOCTSliceDataset reads single slices from zarr directly
+    full_dataset = dataset_class(
         args.meta,
         label or None,
         args.path_col,
         num_slices_to_use=args.slices,
+        slices_per_volume=slices_per_vol,
         sparsing_method=args.sparsing_method,
         img_suffix=args.img_suffix,
     )
 
-    slices_per_vol = getattr(args, "slices_per_volume", 10)
+    # Subset by volume indices, scaled by slices_per_volume
+    train_slice_indices = []
+    for vol_idx in train_idx:
+        for s in range(slices_per_vol):
+            train_slice_indices.append(vol_idx * slices_per_vol + s)
 
-    train_slice_ds = SliceDataset(Subset(volume_dataset, train_idx), slices_per_volume=slices_per_vol)
-    val_slice_ds = SliceDataset(Subset(volume_dataset, val_idx), slices_per_volume=slices_per_vol)
+    val_slice_indices = []
+    for vol_idx in val_idx:
+        for s in range(slices_per_vol):
+            val_slice_indices.append(vol_idx * slices_per_vol + s)
 
     train_loader = DataLoader(
-        train_slice_ds,
+        Subset(full_dataset, train_slice_indices),
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.cpus,
@@ -207,7 +188,7 @@ def setup_ssl_2d_dataloaders(args):
         pin_memory=True,
     )
     val_loader = DataLoader(
-        val_slice_ds,
+        Subset(full_dataset, val_slice_indices),
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.cpus,
@@ -216,7 +197,7 @@ def setup_ssl_2d_dataloaders(args):
     )
 
     logger.info(
-        f"2D slice dataset: {len(train_slice_ds)} train, {len(val_slice_ds)} val "
+        f"2D slice dataset: {len(train_slice_indices)} train, {len(val_slice_indices)} val "
         f"({slices_per_vol} slices/volume)"
     )
     logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
