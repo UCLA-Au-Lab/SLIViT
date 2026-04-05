@@ -16,6 +16,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import GroupShuffleSplit
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +221,8 @@ class Trainer:
         total_loss = 0.0
         n_batches = 0
 
-        for x, _ in loader:
+        pbar = tqdm(loader, desc="Train", leave=False)
+        for x, _ in pbar:
             x = x.to(self.device, non_blocking=True)
 
             with torch.amp.autocast(device_type="cuda"):
@@ -233,6 +235,7 @@ class Trainer:
 
             total_loss += loss.item()
             n_batches += 1
+            pbar.set_postfix(loss=f"{total_loss / n_batches:.4f}")
 
         return total_loss / max(n_batches, 1)
 
@@ -242,12 +245,14 @@ class Trainer:
         n_batches = 0
 
         with torch.no_grad():
-            for x, _ in loader:
+            pbar = tqdm(loader, desc="Val", leave=False)
+            for x, _ in pbar:
                 x = x.to(self.device, non_blocking=True)
                 with torch.amp.autocast(device_type="cuda"):
                     loss = self.model(x)
                 total_loss += loss.item()
                 n_batches += 1
+                pbar.set_postfix(loss=f"{total_loss / n_batches:.4f}")
 
         return total_loss / max(n_batches, 1)
 
