@@ -1,14 +1,12 @@
 """
-Stage 2: Self-supervised MAE pre-training for SLIViT on 3D volumes.
+Stage 1: 2D feature-level MAE pre-training for ConvNeXt.
 
-Trains a Masked Autoencoder end-to-end (ConvNeXt + MONAI ViT MAE)
-to learn volumetric representations without labels.
-
-Optionally loads a ConvNeXt pretrained from Stage 1 (ssl_pretrain_2d.py)
-and trains it with a smaller learning rate via fe_lr_scale.
+Trains ConvNeXt on individual B-scan slices using a masked autoencoder
+at the feature map level. Saves the pretrained ConvNeXt weights for
+use in Stage 2 (3D volumetric MAE).
 
 Usage:
-    python3 ssl_pretrain.py config.yaml
+    python3 ssl_pretrain_2d.py config_2d.yaml
 """
 
 import os
@@ -20,11 +18,11 @@ from types import SimpleNamespace
 import yaml
 import torch
 
-from model.feature_extractor import get_feature_extractor, load_pretrained_feature_extractor
-from model.mae import SLIViTMAE
+from model.feature_extractor import get_feature_extractor
+from model.mae2d import ConvNeXtMAE2D
 from auxiliaries.training import (
     set_seed,
-    setup_ssl_dataloaders,
+    setup_ssl_2d_dataloaders,
     Trainer,
     WarmupCosineSchedule,
 )
@@ -47,33 +45,32 @@ DEFAULTS = {
     "slices": 28,
     "sparsing_method": "eq",
     "img_suffix": "tiff",
-    # Feature extractor
+    "slices_per_volume": 10,
+    # ConvNeXt
     "convnext_variant": "base",
-    "fe_path": "",
     "fe_classes": 4,
-    "fe_lr_scale": 1.0,
-    # Encoder (ViT-Base scale)
-    "hidden_size": 768,
-    "num_layers": 12,
-    "num_heads": 12,
-    "mlp_dim": 3072,
+    # Encoder (operates on 64 ConvNeXt spatial patches)
+    "hidden_size": 512,
+    "num_layers": 6,
+    "num_heads": 8,
+    "mlp_dim": 2048,
     "dropout": 0.0,
     "pos_embed_type": "sincos",
     # Decoder
-    "decoder_hidden_size": 384,
+    "decoder_hidden_size": 256,
     "decoder_num_layers": 4,
-    "decoder_num_heads": 6,
-    "decoder_mlp_dim": 1536,
+    "decoder_num_heads": 4,
+    "decoder_mlp_dim": 1024,
     # MAE
     "mask_ratio": 0.75,
     # Training
-    "out_dir": "./results/mae",
-    "epochs": 100,
-    "batch_size": 8,
+    "out_dir": "./results/mae2d",
+    "epochs": 4,
+    "batch_size": 64,
     "lr": 1.5e-4,
     "weight_decay": 0.05,
-    "warmup_epochs": 10,
-    "patience": 5,
+    "warmup_epochs": 1,
+    "patience": 4,
     "min_delta": 0.0,
     "seed": 1,
     "gpu_id": "0",
@@ -86,14 +83,12 @@ def load_config(path):
     with open(path) as f:
         user_cfg = yaml.safe_load(f) or {}
 
-    # Ensure label is a list or None
     if "label" in user_cfg:
         if user_cfg["label"] is None:
             pass
         elif isinstance(user_cfg["label"], str):
             user_cfg["label"] = user_cfg["label"].split(",")
 
-    # Ensure split_ratio is a list of floats
     if "split_ratio" in user_cfg and isinstance(user_cfg["split_ratio"], str):
         user_cfg["split_ratio"] = [float(x) for x in user_cfg["split_ratio"].split(",")]
 
@@ -107,7 +102,7 @@ def load_config(path):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] in ("-h", "--help"):
-        print(f"Usage: python3 {sys.argv[0]} config.yaml")
+        print(f"Usage: python3 {sys.argv[0]} config_2d.yaml")
         sys.exit(0 if "--help" in sys.argv else 1)
 
     args = load_config(sys.argv[1])
@@ -125,14 +120,13 @@ if __name__ == "__main__":
         format="%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
-            logging.FileHandler(os.path.join(args.out_dir, "ssl_pretrain.log"), mode="w"),
+            logging.FileHandler(os.path.join(args.out_dir, "ssl_pretrain_2d.log"), mode="w"),
             logging.StreamHandler(),
         ],
     )
     logger = logging.getLogger(__name__)
 
-    # Save config to output dir for reproducibility
-    with open(os.path.join(args.out_dir, "config.yaml"), "w") as f:
+    with open(os.path.join(args.out_dir, "config_2d.yaml"), "w") as f:
         yaml.dump(vars(args), f, default_flow_style=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -141,25 +135,16 @@ if __name__ == "__main__":
     logger.info(f"ConvNeXt variant: {args.convnext_variant}")
     logger.info(f"Config: {vars(args)}")
 
-    # Data
-    train_loader, val_loader = setup_ssl_dataloaders(args)
+    # Data — yields individual 2D slices
+    train_loader, val_loader = setup_ssl_2d_dataloaders(args)
 
-    # Model — load ConvNeXt from Stage 1 or from ImageNet/custom weights
-    if args.fe_path and args.fe_path.endswith("convnext_mae2d.pth"):
-        logger.info(f"Loading Stage 1 pretrained ConvNeXt from {args.fe_path}")
-        feature_extractor, feat_channels = load_pretrained_feature_extractor(
-            args.fe_path, variant=args.convnext_variant
-        )
-    else:
-        feature_extractor, feat_channels = get_feature_extractor(
-            args.fe_classes, pretrained_weights=args.fe_path, variant=args.convnext_variant
-        )
+    # Model
+    feature_extractor, feat_channels = get_feature_extractor(
+        args.fe_classes, variant=args.convnext_variant
+    )
 
-    logger.info(f"ConvNeXt output channels: {feat_channels}")
-
-    mae = SLIViTMAE(
+    mae2d = ConvNeXtMAE2D(
         feature_extractor=feature_extractor,
-        num_patches=args.slices,
         feat_channels=feat_channels,
         hidden_size=args.hidden_size,
         mlp_dim=args.mlp_dim,
@@ -174,22 +159,18 @@ if __name__ == "__main__":
         pos_embed_type=args.pos_embed_type,
     )
 
-    n_params = sum(p.numel() for p in mae.parameters() if p.requires_grad)
-    logger.info(f"MAE parameters: {n_params:,}")
+    n_params = sum(p.numel() for p in mae2d.parameters() if p.requires_grad)
+    logger.info(f"ConvNeXtMAE2D parameters: {n_params:,}")
 
-    # Optimizer — discriminative LR for ConvNeXt vs MAE ViT
-    fe_lr = args.lr * args.fe_lr_scale
+    # Optimizer
     optimizer = torch.optim.AdamW(
-        [
-            {"params": mae.feature_extractor.parameters(), "lr": fe_lr},
-            {"params": mae.mae.parameters(), "lr": args.lr},
-        ],
+        mae2d.parameters(),
+        lr=args.lr,
         weight_decay=args.weight_decay,
         betas=(0.9, 0.95),
     )
-    logger.info(f"LR: ConvNeXt={fe_lr:.2e}, MAE ViT={args.lr:.2e} (fe_lr_scale={args.fe_lr_scale})")
 
-    # Scheduler: linear warmup + cosine decay (MONAI)
+    # Scheduler
     scheduler = WarmupCosineSchedule(
         optimizer,
         warmup_steps=args.warmup_epochs,
@@ -197,7 +178,7 @@ if __name__ == "__main__":
         end_lr=1e-6,
     )
 
-    # Wandb (optional)
+    # Wandb
     wandb_run = None
     if args.wandb_name is not None:
         import wandb
@@ -205,7 +186,7 @@ if __name__ == "__main__":
 
     # Train
     trainer = Trainer(
-        model=mae,
+        model=mae2d,
         optimizer=optimizer,
         scheduler=scheduler,
         device=device,
@@ -221,8 +202,13 @@ if __name__ == "__main__":
         logger.error(f"Training failed: {e}")
         raise
     finally:
-        torch.save(mae.state_dict(), os.path.join(args.out_dir, "mae_final.pth"))
-        logger.info(f"Final checkpoint saved to {args.out_dir}/mae_final.pth")
+        # Save full model
+        torch.save(mae2d.state_dict(), os.path.join(args.out_dir, "mae2d_final.pth"))
+
+        # Save just the ConvNeXt feature extractor for Stage 2
+        fe_path = os.path.join(args.out_dir, "convnext_mae2d.pth")
+        mae2d.save_feature_extractor(fe_path)
+        logger.info(f"ConvNeXt feature extractor saved to {fe_path}")
 
         if wandb_run is not None:
             wandb_run.finish()

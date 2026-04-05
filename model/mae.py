@@ -10,9 +10,9 @@ class SLIViTMAE(nn.Module):
     SLIViT MAE: ConvNeXt feature extractor + MONAI MaskedAutoEncoderViT.
 
     The ConvNeXt processes concatenated volume slices into a feature map
-    of shape (B, 768, 8, N*8). This is treated as a 2D "image" with 768
-    channels and fed to MONAI's MAE, which patches it into N patches of
-    (768, 8, 8) = 49,152 values each — one patch per B-scan slice.
+    of shape (B, feat_channels, 8, N*8). This is treated as a 2D "image"
+    and fed to MONAI's MAE, which patches it into N patches of
+    (feat_channels, 8, 8) values each — one patch per B-scan slice.
 
     During training, forward() returns the MSE reconstruction loss.
     For embedding extraction, use encode() which returns the CLS token.
@@ -22,28 +22,28 @@ class SLIViTMAE(nn.Module):
         self,
         feature_extractor,
         num_patches=28,
-        hidden_size=256,
-        mlp_dim=1024,
-        num_layers=5,
-        num_heads=16,
+        feat_channels=1024,
+        hidden_size=768,
+        mlp_dim=3072,
+        num_layers=12,
+        num_heads=12,
         masking_ratio=0.75,
-        decoder_hidden_size=128,
-        decoder_mlp_dim=512,
-        decoder_num_layers=2,
-        decoder_num_heads=4,
+        decoder_hidden_size=384,
+        decoder_mlp_dim=1536,
+        decoder_num_layers=4,
+        decoder_num_heads=6,
         dropout_rate=0.0,
         pos_embed_type="sincos",
     ):
         super().__init__()
         self.feature_extractor = feature_extractor
         self.num_patches = num_patches
-        self.feat_channels = 768
+        self.feat_channels = feat_channels
         self.patch_h = 8
         self.patch_w = 8
-        self.patch_dim = self.feat_channels * self.patch_h * self.patch_w  # 49152
 
         self.mae = MaskedAutoEncoderViT(
-            in_channels=self.feat_channels,
+            in_channels=feat_channels,
             img_size=(self.patch_h, num_patches * self.patch_w),
             patch_size=(self.patch_h, self.patch_w),
             hidden_size=hidden_size,
@@ -72,10 +72,10 @@ class SLIViTMAE(nn.Module):
         Reshape feature map into per-slice patch vectors.
 
         Args:
-            feats: (B, 768, 8, N*8)
+            feats: (B, feat_channels, 8, N*8)
 
         Returns:
-            patches: (B, N, 49152)
+            patches: (B, N, feat_channels*8*8)
         """
         B, C, H, W = feats.shape
         nH = H // self.patch_h
@@ -96,15 +96,15 @@ class SLIViTMAE(nn.Module):
             loss: scalar MSE loss on masked patch features
         """
         # Feature extraction (end-to-end)
-        feats = self._extract_features(x)  # (B, 768, 8, N*8)
+        feats = self._extract_features(x)  # (B, feat_channels, 8, N*8)
 
         # Reconstruction targets (stop gradient)
-        targets = self._patchify(feats.detach())  # (B, N, 49152)
+        targets = self._patchify(feats.detach())
 
         # MONAI MAE: patch embed → mask → encode → decode → predict
         # Disable autocast — MONAI's index assignment doesn't support mixed dtypes
         with torch.amp.autocast(device_type="cuda", enabled=False):
-            pred, mask = self.mae(feats.float())  # pred: (B, N, 49152), mask: (B, N) 1=masked
+            pred, mask = self.mae(feats.float())
 
         # MSE loss on masked patches only
         loss = F.mse_loss(pred[mask == 1], targets[mask == 1])
@@ -120,7 +120,7 @@ class SLIViTMAE(nn.Module):
         Returns:
             embeddings: (B, hidden_size)
         """
-        feats = self._extract_features(x)  # (B, 768, 8, N*8)
+        feats = self._extract_features(x)
 
         # Patch embedding (conv projection + positional embedding)
         tokens = self.mae.patch_embedding(feats)  # (B, N, hidden_size)

@@ -14,7 +14,7 @@ import logging
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 from sklearn.model_selection import GroupShuffleSplit
 from tqdm import tqdm
 
@@ -141,6 +141,84 @@ def setup_ssl_dataloaders(args):
         pin_memory=True,
     )
 
+    logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+    return train_loader, val_loader
+
+
+# ---------------------------------------------------------------------------
+# SliceDataset — yields individual 2D slices from 3D volume datasets
+# ---------------------------------------------------------------------------
+
+class SliceDataset(Dataset):
+    """
+    Wraps a 3D volume dataset and yields individual 2D slices.
+
+    Each volume is (3, 256, 256*N) — N slices concatenated along width.
+    This dataset samples `slices_per_volume` random slices from each volume,
+    yielding (3, 256, 256) tensors.
+    """
+
+    def __init__(self, volume_dataset, slices_per_volume=10):
+        self.volume_dataset = volume_dataset
+        self.slices_per_volume = slices_per_volume
+
+    def __len__(self):
+        return len(self.volume_dataset) * self.slices_per_volume
+
+    def __getitem__(self, idx):
+        vol_idx = idx // self.slices_per_volume
+        volume, _ = self.volume_dataset[vol_idx]  # (3, 256, 256*N)
+        n_slices = volume.shape[-1] // 256
+        slice_idx = torch.randint(0, n_slices, (1,)).item()
+        start = slice_idx * 256
+        single_slice = volume[:, :, start:start + 256]  # (3, 256, 256)
+        return single_slice, torch.tensor(0.0)
+
+
+def setup_ssl_2d_dataloaders(args):
+    """Build train/val DataLoaders that yield individual 2D slices for Stage 1."""
+    dataset_class = get_dataset_class(args.dataset_name)
+
+    label = args.label if args.label is not None else []
+    train_idx, val_idx, _ = get_split_indices(
+        args.meta, args.out_dir, args.split_ratio, label, args.split_col, args.pid_col
+    )
+
+    volume_dataset = dataset_class(
+        args.meta,
+        label or None,
+        args.path_col,
+        num_slices_to_use=args.slices,
+        sparsing_method=args.sparsing_method,
+        img_suffix=args.img_suffix,
+    )
+
+    slices_per_vol = getattr(args, "slices_per_volume", 10)
+
+    train_slice_ds = SliceDataset(Subset(volume_dataset, train_idx), slices_per_volume=slices_per_vol)
+    val_slice_ds = SliceDataset(Subset(volume_dataset, val_idx), slices_per_volume=slices_per_vol)
+
+    train_loader = DataLoader(
+        train_slice_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.cpus,
+        drop_last=True,
+        pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_slice_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.cpus,
+        drop_last=False,
+        pin_memory=True,
+    )
+
+    logger.info(
+        f"2D slice dataset: {len(train_slice_ds)} train, {len(val_slice_ds)} val "
+        f"({slices_per_vol} slices/volume)"
+    )
     logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
     return train_loader, val_loader
 
