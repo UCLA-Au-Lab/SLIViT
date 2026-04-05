@@ -2,13 +2,18 @@
 
 Train SLIViT as an embedding model using Masked Autoencoders (MAE) on unlabeled 3D volumes. No labels required.
 
+Uses [MONAI's MaskedAutoEncoderViT](https://docs.monai.io/en/stable/networks.html#maskedautoencodervit) under the hood.
+
 ## How it works
 
 ```
 3D volume (N slices)
     |
     v
-ConvNeXt feature extractor --> N patch features (768x64 each)
+ConvNeXt feature extractor --> feature map (768, 8, N*8)
+    |
+    v
+MONAI MAE: patch into N patches of (768, 8, 8) each
     |
     v
 Randomly mask 75% of patches
@@ -39,17 +44,19 @@ out_dir: ./results/mae
 fe_path: ./checkpoints/kermany/feature_extractor.pth
 ```
 
+No `label` field needed -- it defaults to `null` for SSL.
+
 ### 2. Implement your dataset
 
-Edit `datasets/HeidelbergOCTDataset.py` — follow the TODOs and shape contract in the docstring. The key requirement:
+Edit `datasets/HeidelbergOCTDataset.py` -- follow the shape contract in the docstring:
 
 ```
 __getitem__ returns (volume, label) where:
   volume: FloatTensor of shape (3, 256, 256 * num_slices)
-  label:  FloatTensor (ignored during SSL, use a dummy value)
+  label:  FloatTensor (ignored during SSL, use torch.tensor(0.0))
 ```
 
-Each slice is resized to 256x256, converted to 3-channel float [0,1], then all slices are concatenated along the width dimension.
+Each slice is resized to 256x256, converted to 3-channel float [0,1], then concatenated along width.
 
 ### 3. Train
 
@@ -81,9 +88,9 @@ All fields are optional -- defaults are shown below.
 
 ```yaml
 # --- Data ---
-dataset_name: oct3d          # Dataset class to use (oct3d, heidelberg, us3d, etc.)
+dataset_name: oct3d          # Dataset class (oct3d, heidelberg, us3d, etc.)
 meta: null                   # Path to metadata CSV
-label: [dummy]               # Label column(s) -- ignored for SSL
+label: null                  # Label column(s) -- null for SSL (no labels needed)
 path_col: path               # CSV column with volume paths
 split_col: split             # CSV column for train/val/test split
 pid_col: pid                 # CSV column for patient ID (grouped splitting)
@@ -96,17 +103,19 @@ img_suffix: tiff             # Slice file extension
 fe_path: ""                  # Path to pretrained ConvNeXt weights (empty = ImageNet)
 fe_classes: 4                # Number of classes the feature extractor was pretrained on
 
-# --- Encoder (ViT) ---
-vit_dim: 256                 # Transformer embedding dimension
-vit_depth: 5                 # Number of transformer layers
-heads: 20                    # Number of attention heads
+# --- Encoder (MONAI ViT) ---
+hidden_size: 256             # Transformer embedding dimension
+num_layers: 5                # Number of transformer layers
+num_heads: 16                # Number of attention heads (must divide hidden_size)
+mlp_dim: 1024                # Feedforward dimension
 dropout: 0.0
-emb_dropout: 0.0
+pos_embed_type: sincos       # Positional embedding: sincos or learnable
 
 # --- Decoder ---
-decoder_dim: 128             # Decoder embedding dimension
-decoder_depth: 2             # Decoder transformer layers
-decoder_heads: 4             # Decoder attention heads
+decoder_hidden_size: 128     # Decoder embedding dimension
+decoder_num_layers: 2        # Decoder transformer layers
+decoder_num_heads: 4         # Decoder attention heads (must divide decoder_hidden_size)
+decoder_mlp_dim: 512         # Decoder feedforward dimension
 
 # --- MAE ---
 mask_ratio: 0.75             # Fraction of patches to mask (0.75 = 75%)
@@ -134,7 +143,7 @@ wandb_name: null             # Set to enable Weights & Biases logging
   mae_final.pth         # Final model (last epoch)
   config.yaml           # Full config snapshot for reproducibility
   training_log.csv      # Per-epoch train/val loss, lr, time
-  ssl_pretrain.log       # Full training log
+  ssl_pretrain.log      # Full training log
 ```
 
 ## Architecture details
@@ -142,12 +151,13 @@ wandb_name: null             # Set to enable Weights & Biases logging
 | Component | Config | Default |
 |-----------|--------|---------|
 | Feature extractor | ConvNeXt-Tiny | `facebook/convnext-tiny-224` |
-| Encoder | ViT | dim=256, depth=5, heads=20 |
-| Decoder | Lightweight ViT | dim=128, depth=2, heads=4 |
-| Patch feature dim | 768 x 64 = 49,152 | Fixed by ConvNeXt output |
-| Embedding dim | = vit_dim | 256 |
+| Encoder | MONAI ViT | hidden_size=256, layers=5, heads=16 |
+| Decoder | MONAI ViT (lightweight) | hidden_size=128, layers=2, heads=4 |
+| Patch feature dim | 768 x 8 x 8 = 49,152 | Fixed by ConvNeXt output |
+| Embedding dim | = hidden_size | 256 |
+| Positional embedding | sincos | Fixed (not learned) |
 
-The encoder mirrors the standard SLIViT ViT configuration. The decoder is intentionally small -- it only needs to interpolate between visible patch features, not perform heavy reasoning.
+The ConvNeXt output (768, 8, N*8) is treated as a 2D image with 768 channels. MONAI's MAE patches it with (8, 8) patches, yielding N patches -- one per B-scan slice.
 
 ## Downstream use
 
@@ -159,12 +169,13 @@ After pre-training, the encoder can be used in two ways:
 embeddings = mae.encode(volumes)  # (B, 256)
 ```
 
-**For fine-tuning** -- load the pre-trained encoder weights into a supervised SLIViT model and fine-tune with labels on a downstream task.
+**For fine-tuning** -- load the pre-trained encoder weights into a supervised model and fine-tune with labels on a downstream task.
 
 ## Training tips
 
 - **Mask ratio 0.75** works well because adjacent OCT slices are highly correlated. If your data has less inter-slice redundancy, try 0.5-0.6.
 - **Batch size 4** is typical for 3D volumes. The MAE loss doesn't depend on batch size (unlike contrastive methods), so small batches are fine.
+- **num_heads must divide hidden_size**. Default: 256 / 16 = 16 per head. If you change hidden_size, pick num_heads accordingly.
+- **sincos positional embeddings** (default) are fixed and work well for small datasets. Switch to `learnable` if you have lots of data.
 - **Monitor val loss** -- it should decrease steadily. If it plateaus at epoch 0, the learning rate is likely too high.
 - **Mixed precision** is enabled by default (`torch.amp`), roughly halving memory usage.
-- Training logs to both console and `{out_dir}/ssl_pretrain.log`. Per-epoch metrics are in `training_log.csv`.

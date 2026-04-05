@@ -1,244 +1,106 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
+
+from monai.networks.nets import MaskedAutoEncoderViT
 
 
 class SLIViTMAE(nn.Module):
     """
-    Masked Autoencoder for SLIViT.
+    SLIViT MAE: ConvNeXt feature extractor + MONAI MaskedAutoEncoderViT.
 
-    Architecture:
-      ConvNeXt feature extractor → ViT encoder (with masking) → lightweight decoder
+    The ConvNeXt processes concatenated volume slices into a feature map
+    of shape (B, 768, 8, N*8). This is treated as a 2D "image" with 768
+    channels and fed to MONAI's MAE, which patches it into N patches of
+    (768, 8, 8) = 49,152 values each — one patch per B-scan slice.
 
-    During training, a fraction of slice-patches are masked. The encoder processes
-    only visible patches; the decoder reconstructs masked patch features.
-
-    For embedding extraction, use the `encode()` method which returns the CLS token.
+    During training, forward() returns the MSE reconstruction loss.
+    For embedding extraction, use encode() which returns the CLS token.
     """
 
     def __init__(
         self,
         feature_extractor,
-        num_patches,
-        encoder_dim=256,
-        encoder_depth=5,
-        encoder_heads=20,
-        decoder_dim=128,
-        decoder_depth=2,
-        decoder_heads=4,
-        mask_ratio=0.75,
-        patch_feat_dim=768 * 64,
-        dropout=0.0,
-        emb_dropout=0.0,
+        num_patches=28,
+        hidden_size=256,
+        mlp_dim=1024,
+        num_layers=5,
+        num_heads=16,
+        masking_ratio=0.75,
+        decoder_hidden_size=128,
+        decoder_mlp_dim=512,
+        decoder_num_layers=2,
+        decoder_num_heads=4,
+        dropout_rate=0.0,
+        pos_embed_type="sincos",
     ):
         super().__init__()
         self.feature_extractor = feature_extractor
         self.num_patches = num_patches
-        self.mask_ratio = mask_ratio
-        self.patch_feat_dim = patch_feat_dim
+        self.feat_channels = 768
+        self.patch_h = 8
+        self.patch_w = 8
+        self.patch_dim = self.feat_channels * self.patch_h * self.patch_w  # 49152
 
-        # --- Encoder ---
-        self.patch_embed = nn.Linear(patch_feat_dim, encoder_dim)
-        self.cls_token = nn.Parameter(torch.randn(1, 1, encoder_dim))
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, encoder_dim) * 0.02)
-        self.emb_dropout = nn.Dropout(emb_dropout)
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=encoder_dim,
-            nhead=encoder_heads,
-            dim_feedforward=encoder_dim * 4,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_depth)
-        self.encoder_norm = nn.LayerNorm(encoder_dim)
-
-        # --- Decoder ---
-        self.decoder_embed = nn.Linear(encoder_dim, decoder_dim)
-        self.mask_token = nn.Parameter(torch.randn(1, 1, decoder_dim) * 0.02)
-        self.decoder_pos_embedding = nn.Parameter(
-            torch.randn(1, num_patches + 1, decoder_dim) * 0.02
+        self.mae = MaskedAutoEncoderViT(
+            in_channels=self.feat_channels,
+            img_size=(self.patch_h, num_patches * self.patch_w),
+            patch_size=(self.patch_h, self.patch_w),
+            hidden_size=hidden_size,
+            mlp_dim=mlp_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            masking_ratio=masking_ratio,
+            decoder_hidden_size=decoder_hidden_size,
+            decoder_mlp_dim=decoder_mlp_dim,
+            decoder_num_layers=decoder_num_layers,
+            decoder_num_heads=decoder_num_heads,
+            proj_type="conv",
+            pos_embed_type=pos_embed_type,
+            decoder_pos_embed_type=pos_embed_type,
+            dropout_rate=dropout_rate,
+            spatial_dims=2,
         )
 
-        decoder_layer = nn.TransformerEncoderLayer(
-            d_model=decoder_dim,
-            nhead=decoder_heads,
-            dim_feedforward=decoder_dim * 4,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=decoder_depth)
-        self.decoder_norm = nn.LayerNorm(decoder_dim)
-        self.decoder_pred = nn.Linear(decoder_dim, patch_feat_dim)
-
-        self._init_weights()
-
-    def _init_weights(self):
-        # Xavier uniform for linear layers, normal for embeddings
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-        nn.init.normal_(self.cls_token, std=0.02)
-        nn.init.normal_(self.mask_token, std=0.02)
-        nn.init.normal_(self.pos_embedding, std=0.02)
-        nn.init.normal_(self.decoder_pos_embedding, std=0.02)
-
-    def random_masking(self, B, N, device):
+    def _patchify(self, feats):
         """
-        Per-sample random masking via argsort of noise.
-
-        Returns:
-            ids_keep: (B, num_visible) indices of visible patches
-            ids_mask: (B, num_masked) indices of masked patches
-            ids_restore: (B, N) indices to unshuffle back to original order
-        """
-        num_keep = max(1, int(N * (1 - self.mask_ratio)))
-
-        noise = torch.rand(B, N, device=device)
-        ids_shuffle = torch.argsort(noise, dim=1)
-        ids_restore = torch.argsort(ids_shuffle, dim=1)
-
-        ids_keep = ids_shuffle[:, :num_keep]
-        ids_mask = ids_shuffle[:, num_keep:]
-
-        return ids_keep, ids_mask, ids_restore
-
-    def forward_encoder(self, patches, ids_keep):
-        """
-        Encode only visible patches.
+        Reshape feature map into per-slice patch vectors.
 
         Args:
-            patches: (B, N, patch_feat_dim) all patch features
-            ids_keep: (B, num_visible) indices of visible patches
+            feats: (B, 768, 8, N*8)
 
         Returns:
-            encoded: (B, 1 + num_visible, encoder_dim)
+            patches: (B, N, 49152)
         """
-        B = patches.shape[0]
-
-        # Gather visible patches
-        visible = torch.gather(
-            patches, 1, ids_keep.unsqueeze(-1).expand(-1, -1, self.patch_feat_dim)
-        )  # (B, num_visible, patch_feat_dim)
-
-        # Embed
-        visible = self.patch_embed(visible)  # (B, num_visible, encoder_dim)
-
-        # Add positional embeddings (skip pos 0 which is for CLS)
-        vis_pos = torch.gather(
-            self.pos_embedding[:, 1:].expand(B, -1, -1),
-            1,
-            ids_keep.unsqueeze(-1).expand(-1, -1, visible.shape[-1]),
-        )
-        visible = visible + vis_pos
-
-        # Prepend CLS token
-        cls_tokens = self.cls_token.expand(B, -1, -1) + self.pos_embedding[:, :1]
-        visible = torch.cat([cls_tokens, visible], dim=1)
-
-        visible = self.emb_dropout(visible)
-
-        # Encode
-        encoded = self.encoder(visible)
-        encoded = self.encoder_norm(encoded)
-
-        return encoded
-
-    def forward_decoder(self, encoded, ids_restore):
-        """
-        Decode: project encoder output, add mask tokens, predict patch features.
-
-        Args:
-            encoded: (B, 1 + num_visible, encoder_dim)
-            ids_restore: (B, N) indices to unshuffle
-
-        Returns:
-            pred: (B, N, patch_feat_dim) predicted features for all positions
-        """
-        B, _, _ = encoded.shape
-
-        # Project to decoder dim
-        tokens = self.decoder_embed(encoded)  # (B, 1 + num_visible, decoder_dim)
-
-        # Separate CLS and patch tokens
-        cls_dec = tokens[:, :1]
-        patch_tokens = tokens[:, 1:]  # (B, num_visible, decoder_dim)
-
-        # Append mask tokens for masked positions
-        num_masked = self.num_patches - patch_tokens.shape[1]
-        mask_tokens = self.mask_token.expand(B, num_masked, -1)
-        all_patch_tokens = torch.cat([patch_tokens, mask_tokens], dim=1)  # (B, N, decoder_dim)
-
-        # Unshuffle to original order
-        all_patch_tokens = torch.gather(
-            all_patch_tokens,
-            1,
-            ids_restore.unsqueeze(-1).expand(-1, -1, all_patch_tokens.shape[-1]),
-        )
-
-        # Add decoder positional embeddings
-        all_patch_tokens = all_patch_tokens + self.decoder_pos_embedding[:, 1:]
-
-        # Prepend CLS
-        cls_dec = cls_dec + self.decoder_pos_embedding[:, :1]
-        full_seq = torch.cat([cls_dec, all_patch_tokens], dim=1)  # (B, 1+N, decoder_dim)
-
-        # Decode
-        decoded = self.decoder(full_seq)
-        decoded = self.decoder_norm(decoded)
-
-        # Predict patch features (skip CLS)
-        pred = self.decoder_pred(decoded[:, 1:])  # (B, N, patch_feat_dim)
-
-        return pred
+        B, C, H, W = feats.shape
+        nH = H // self.patch_h
+        nW = W // self.patch_w
+        patches = feats.reshape(B, C, nH, self.patch_h, nW, self.patch_w)
+        patches = patches.permute(0, 2, 4, 1, 3, 5)  # (B, nH, nW, C, pH, pW)
+        patches = patches.reshape(B, nH * nW, -1)  # (B, N, C*pH*pW)
+        return patches
 
     def forward(self, x):
         """
         MAE forward pass: extract features, mask, encode, decode, compute loss.
 
         Args:
-            x: (B, C, H, W) concatenated volume slices
+            x: (B, 3, 256, 256*N) concatenated volume slices
 
         Returns:
             loss: scalar MSE loss on masked patch features
         """
-        B = x.shape[0]
-
-        # 1. Feature extraction (full volume, end-to-end)
-        feats = self.feature_extractor(x).last_hidden_state  # (B, 768, H, W)
-        feats = feats.reshape(B, self.num_patches, 768, 64)  # (B, N, 768, 64)
+        # Feature extraction (end-to-end)
+        feats = self.feature_extractor(x).last_hidden_state  # (B, 768, 8, N*8)
 
         # Reconstruction targets (stop gradient)
-        targets = feats.detach().reshape(B, self.num_patches, -1)  # (B, N, 768*64)
+        targets = self._patchify(feats.detach())  # (B, N, 49152)
 
-        # Flatten patches for encoder input
-        patches = feats.reshape(B, self.num_patches, -1)  # (B, N, 768*64)
+        # MONAI MAE: patch embed → mask → encode → decode → predict
+        pred, mask = self.mae(feats)  # pred: (B, N, 49152), mask: (B, N) 1=masked
 
-        # 2. Random masking
-        ids_keep, ids_mask, ids_restore = self.random_masking(B, self.num_patches, x.device)
-
-        # 3. Encode visible patches
-        encoded = self.forward_encoder(patches, ids_keep)
-
-        # 4. Decode all patches
-        pred = self.forward_decoder(encoded, ids_restore)
-
-        # 5. Loss: MSE on masked patches only
-        target_masked = torch.gather(
-            targets, 1, ids_mask.unsqueeze(-1).expand(-1, -1, self.patch_feat_dim)
-        )
-        pred_masked = torch.gather(
-            pred, 1, ids_mask.unsqueeze(-1).expand(-1, -1, self.patch_feat_dim)
-        )
-        loss = F.mse_loss(pred_masked, target_masked)
-
+        # MSE loss on masked patches only
+        loss = F.mse_loss(pred[mask == 1], targets[mask == 1])
         return loss
 
     def encode(self, x):
@@ -246,26 +108,21 @@ class SLIViTMAE(nn.Module):
         Extract volume embeddings (CLS token) — no masking.
 
         Args:
-            x: (B, C, H, W) concatenated volume slices
+            x: (B, 3, 256, 256*N) concatenated volume slices
 
         Returns:
-            embeddings: (B, encoder_dim)
+            embeddings: (B, hidden_size)
         """
-        B = x.shape[0]
+        feats = self.feature_extractor(x).last_hidden_state  # (B, 768, 8, N*8)
 
-        feats = self.feature_extractor(x).last_hidden_state
-        feats = feats.reshape(B, self.num_patches, 768, 64)
-        patches = feats.reshape(B, self.num_patches, -1)
+        # Patch embedding (conv projection + positional embedding)
+        tokens = self.mae.patch_embedding(feats)  # (B, N, hidden_size)
 
-        # Embed all patches
-        tokens = self.patch_embed(patches) + self.pos_embedding[:, 1:]
+        # Prepend CLS token
+        cls_tokens = self.mae.cls_token.expand(tokens.shape[0], -1, -1)
+        tokens = torch.cat((cls_tokens, tokens), dim=1)  # (B, 1+N, hidden_size)
 
-        # Prepend CLS
-        cls_tokens = self.cls_token.expand(B, -1, -1) + self.pos_embedding[:, :1]
-        tokens = torch.cat([cls_tokens, tokens], dim=1)
+        # Encoder
+        tokens = self.mae.blocks(tokens)  # (B, 1+N, hidden_size)
 
-        # Encode
-        encoded = self.encoder(tokens)
-        encoded = self.encoder_norm(encoded)
-
-        return encoded[:, 0]  # CLS token embedding
+        return tokens[:, 0]  # CLS token embedding

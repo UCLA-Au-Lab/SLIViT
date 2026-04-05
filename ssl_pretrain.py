@@ -1,7 +1,7 @@
 """
 Self-supervised MAE pre-training for SLIViT on 3D volumes.
 
-Trains a Masked Autoencoder end-to-end (ConvNeXt + ViT encoder + decoder)
+Trains a Masked Autoencoder end-to-end (ConvNeXt + MONAI ViT MAE)
 to learn volumetric representations without labels.
 
 Usage:
@@ -23,7 +23,7 @@ from auxiliaries.training import (
     set_seed,
     setup_ssl_dataloaders,
     Trainer,
-    WarmupCosineScheduler,
+    WarmupCosineSchedule,
 )
 
 warnings.filterwarnings("ignore")
@@ -36,7 +36,7 @@ DEFAULTS = {
     # Data
     "dataset_name": "oct3d",
     "meta": None,
-    "label": ["dummy"],
+    "label": None,
     "path_col": "path",
     "split_col": "split",
     "pid_col": "pid",
@@ -47,16 +47,18 @@ DEFAULTS = {
     # Feature extractor
     "fe_path": "",
     "fe_classes": 4,
-    # Encoder (matches SLIViT ViT defaults)
-    "vit_dim": 256,
-    "vit_depth": 5,
-    "heads": 20,
+    # Encoder
+    "hidden_size": 256,
+    "num_layers": 5,
+    "num_heads": 16,
+    "mlp_dim": 1024,
     "dropout": 0.0,
-    "emb_dropout": 0.0,
+    "pos_embed_type": "sincos",
     # Decoder
-    "decoder_dim": 128,
-    "decoder_depth": 2,
-    "decoder_heads": 4,
+    "decoder_hidden_size": 128,
+    "decoder_num_layers": 2,
+    "decoder_num_heads": 4,
+    "decoder_mlp_dim": 512,
     # MAE
     "mask_ratio": 0.75,
     # Training
@@ -79,9 +81,12 @@ def load_config(path):
     with open(path) as f:
         user_cfg = yaml.safe_load(f) or {}
 
-    # Ensure label is a list
-    if "label" in user_cfg and isinstance(user_cfg["label"], str):
-        user_cfg["label"] = user_cfg["label"].split(",")
+    # Ensure label is a list or None
+    if "label" in user_cfg:
+        if user_cfg["label"] is None:
+            pass
+        elif isinstance(user_cfg["label"], str):
+            user_cfg["label"] = user_cfg["label"].split(",")
 
     # Ensure split_ratio is a list of floats
     if "split_ratio" in user_cfg and isinstance(user_cfg["split_ratio"], str):
@@ -139,15 +144,17 @@ if __name__ == "__main__":
     mae = SLIViTMAE(
         feature_extractor=feature_extractor,
         num_patches=args.slices,
-        encoder_dim=args.vit_dim,
-        encoder_depth=args.vit_depth,
-        encoder_heads=args.heads,
-        decoder_dim=args.decoder_dim,
-        decoder_depth=args.decoder_depth,
-        decoder_heads=args.decoder_heads,
-        mask_ratio=args.mask_ratio,
-        dropout=args.dropout,
-        emb_dropout=args.emb_dropout,
+        hidden_size=args.hidden_size,
+        mlp_dim=args.mlp_dim,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        masking_ratio=args.mask_ratio,
+        decoder_hidden_size=args.decoder_hidden_size,
+        decoder_mlp_dim=args.decoder_mlp_dim,
+        decoder_num_layers=args.decoder_num_layers,
+        decoder_num_heads=args.decoder_num_heads,
+        dropout_rate=args.dropout,
+        pos_embed_type=args.pos_embed_type,
     )
 
     n_params = sum(p.numel() for p in mae.parameters() if p.requires_grad)
@@ -161,12 +168,12 @@ if __name__ == "__main__":
         betas=(0.9, 0.95),
     )
 
-    # Scheduler: linear warmup + cosine decay
-    scheduler = WarmupCosineScheduler(
+    # Scheduler: linear warmup + cosine decay (MONAI)
+    scheduler = WarmupCosineSchedule(
         optimizer,
-        warmup_epochs=args.warmup_epochs,
-        total_epochs=args.epochs,
-        min_lr=1e-6,
+        warmup_steps=args.warmup_epochs,
+        t_total=args.epochs,
+        end_lr=1e-6,
     )
 
     # Wandb (optional)

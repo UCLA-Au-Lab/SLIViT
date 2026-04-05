@@ -109,13 +109,14 @@ def setup_ssl_dataloaders(args):
     """Build train/val PyTorch DataLoaders for self-supervised pre-training."""
     dataset_class = get_dataset_class(args.dataset_name)
 
+    label = args.label if args.label is not None else []
     train_idx, val_idx, _ = get_split_indices(
-        args.meta, args.out_dir, args.split_ratio, args.label, args.split_col, args.pid_col
+        args.meta, args.out_dir, args.split_ratio, label, args.split_col, args.pid_col
     )
 
     dataset = dataset_class(
         args.meta,
-        args.label,
+        label or None,
         args.path_col,
         num_slices_to_use=args.slices,
         sparsing_method=args.sparsing_method,
@@ -143,29 +144,8 @@ def setup_ssl_dataloaders(args):
     return train_loader, val_loader
 
 
-# ---------------------------------------------------------------------------
-# Learning rate scheduler with linear warmup + cosine decay
-# ---------------------------------------------------------------------------
-
-class WarmupCosineScheduler(torch.optim.lr_scheduler._LRScheduler):
-    def __init__(self, optimizer, warmup_epochs, total_epochs, min_lr=0.0, last_epoch=-1):
-        self.warmup_epochs = warmup_epochs
-        self.total_epochs = total_epochs
-        self.min_lr = min_lr
-        super().__init__(optimizer, last_epoch)
-
-    def get_lr(self):
-        if self.last_epoch < self.warmup_epochs:
-            # Linear warmup
-            alpha = self.last_epoch / max(1, self.warmup_epochs)
-            return [base_lr * alpha for base_lr in self.base_lrs]
-        else:
-            # Cosine decay
-            progress = (self.last_epoch - self.warmup_epochs) / max(
-                1, self.total_epochs - self.warmup_epochs
-            )
-            cosine = 0.5 * (1.0 + np.cos(np.pi * progress))
-            return [self.min_lr + (base_lr - self.min_lr) * cosine for base_lr in self.base_lrs]
+# Re-export MONAI's warmup cosine scheduler for convenience
+from monai.optimizers.lr_scheduler import WarmupCosineSchedule
 
 
 # ---------------------------------------------------------------------------
