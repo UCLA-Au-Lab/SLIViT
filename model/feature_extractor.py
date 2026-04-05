@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from transformers import AutoModelForImageClassification as amfic
+from transformers import AutoModel
 
 
 CONVNEXT_CONFIGS = {
@@ -31,30 +31,28 @@ class CustomHuggingFaceModel(nn.Module):
         return self.model(x).logits
 
 
-def get_feature_extractor(num_labels, pretrained_weights='', variant='tiny'):
+def get_feature_extractor(num_labels=4, pretrained_weights='', variant='base'):
     """
     Build a ConvNeXt feature extractor.
 
     Args:
-        num_labels: number of classification labels (only affects the discarded head).
-        pretrained_weights: path to a .pth file with CustomHuggingFaceModel weights.
+        num_labels: unused (kept for backward compat with old call sites).
+        pretrained_weights: path to a .pth file with feature extractor weights.
         variant: ConvNeXt size — 'tiny', 'small', 'base', or 'large'.
 
     Returns:
         (feature_extractor, channels): the nn.Sequential feature extractor and its output channel count.
     """
     cfg = CONVNEXT_CONFIGS[variant]
-    convnext = amfic.from_pretrained(cfg["model"], return_dict=False,
-                                     num_labels=num_labels, ignore_mismatched_sizes=True)
+    model = AutoModel.from_pretrained(cfg["model"])
 
-    chf = CustomHuggingFaceModel(convnext)
+    # Extract embeddings + encoder, drop final LayerNorm
+    children = list(model.children())
+    fe = torch.nn.Sequential(*list(children)[:2])
 
     if pretrained_weights:
-        chf.load_state_dict(torch.load(pretrained_weights, map_location=torch.device("cuda")))
+        fe.load_state_dict(torch.load(pretrained_weights, map_location=torch.device("cuda")))
 
-    nested_model = list(chf.model.children())[0]
-
-    fe = torch.nn.Sequential(*list(nested_model.children())[:2])  # drop last LayerNorm layer
     return fe, cfg["channels"]
 
 
