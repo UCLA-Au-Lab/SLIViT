@@ -102,7 +102,9 @@ class SLIViTMAE(nn.Module):
         targets = self._patchify(feats.detach())  # (B, N, 49152)
 
         # MONAI MAE: patch embed → mask → encode → decode → predict
-        pred, mask = self.mae(feats)  # pred: (B, N, 49152), mask: (B, N) 1=masked
+        # Disable autocast — MONAI's index assignment doesn't support mixed dtypes
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            pred, mask = self.mae(feats.float())  # pred: (B, N, 49152), mask: (B, N) 1=masked
 
         # MSE loss on masked patches only
         loss = F.mse_loss(pred[mask == 1], targets[mask == 1])
