@@ -69,9 +69,9 @@ def get_split_indices(meta, out_dir, split_ratio, label, split_col, pid_col):
 
     if split_col in df.columns:
         logger.info(f"Using pre-defined split column: {split_col}")
-        train_idx = np.argwhere(df[split_col].str.contains("train", case=False)).flatten()
-        val_idx = np.argwhere(df[split_col].str.contains("val", case=False)).flatten()
-        test_idx = np.argwhere(df[split_col].str.contains("test", case=False)).flatten()
+        train_idx = np.argwhere(df[split_col].str.contains("train", case=False).values).flatten()
+        val_idx = np.argwhere(df[split_col].str.contains("val", case=False).values).flatten()
+        test_idx = np.argwhere(df[split_col].str.contains("test", case=False).values).flatten()
         df.to_csv(f"{out_dir}/{os.path.split(meta)[-1]}", index=False)
         return train_idx, val_idx, test_idx
 
