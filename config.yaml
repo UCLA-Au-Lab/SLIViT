@@ -1,0 +1,4 @@
+dataset_name: heidelberg
+meta: ./meta/heidelberg.csv
+out_dir: ./results/mae
+fe_path: ./checkpoints/kermany/feature_extractor.pth

@@ -9,7 +9,8 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset
 from torchvision import transforms as tf
-
+import pandas as pd
+import zarr
 
 # Per-slice transform: grayscale → (3, 256, 256) float tensor in [0, 1]
 per_slice_transform = tf.Compose([
@@ -65,30 +66,29 @@ class HeidelbergOCTDataset(Dataset):
         sparsing_method="eq",
         img_suffix="tiff",
     ):
-        # TODO: Load your metadata
         #   - Read the CSV / dataframe
         #   - Store volume paths and labels
         #   - Example:
-        #     import pandas as pd
-        #     df = pd.read_csv(meta) if isinstance(meta, str) else meta
-        #     self.paths = df[path_col_name].values
-        #     self.labels = df[label_name].values
+        
+        df = pd.read_csv(meta) if isinstance(meta, str) else meta
+        self.paths = df[path_col_name].values
+        self.labels = df[label_name].values
+        
         self.num_slices = num_slices_to_use
         self.sparsing_method = sparsing_method
         self.img_suffix = img_suffix
         self.transform = per_slice_transform
+
         raise NotImplementedError("Fill in __init__ with your metadata loading logic")
 
     def __len__(self):
-        # TODO: Return the number of volumes
-        #   return len(self.paths)
-        raise NotImplementedError
+        return len(self.paths)
+        # raise NotImplementedError
 
     def __getitem__(self, idx):
-        # TODO: Implement volume loading. Follow these steps:
 
         # ── Step 1: Get the volume path ──
-        # vol_path = self.paths[idx]
+        vol_path = self.paths[idx]
 
         # ── Step 2: List and select slices ──
         # Get all slice filenames, sort them, and pick N equally-spaced indices.
@@ -97,28 +97,32 @@ class HeidelbergOCTDataset(Dataset):
         # all_slices = sorted([
         #     f for f in os.listdir(vol_path) if f.endswith(self.img_suffix)
         # ])
+        grp = zarr.open_group("/hdd1/UCLA_MP/volumetric/arrs.zarr", path=vol_path)
+        vol = grp["volume"] # shape of (C, H, W, )
         # total = len(all_slices)
-        # indices = np.linspace(0, total - 1, self.num_slices).astype(int)
+        total = vol.shape[1]
+        indices = np.linspace(0, total - 1, self.num_slices).astype(int)
+
 
         # ── Step 3: Load and transform each slice ──
         # Each slice should be loaded as a numpy array or PIL Image.
         # The transform handles: resize → float tensor → 3-channel.
         #
-        # import PIL
+        # 
         # from torchvision.transforms import ToTensor
-        # slices = []
-        # for i in indices:
-        #     img = PIL.Image.open(os.path.join(vol_path, all_slices[i]))
-        #     slices.append(self.transform(ToTensor()(img)))
-        #     # Each slice is now (3, 256, 256)
+        slices = []
+        for i in indices:
+            img = vol[:, i, :, :]
+            slices.append(self.transform(img))
+            # Each slice is now (3, 256, 256)
 
         # ── Step 4: Concatenate along width ──
-        # volume = torch.cat(slices, dim=-1)  # → (3, 256, 256 * num_slices)
+        volume = torch.cat(slices, dim=-1)  # → (3, 256, 256 * num_slices)
 
         # ── Step 5: Get label (dummy for SSL) ──
-        # label = torch.tensor(0.0)  # unused during SSL
+        label = torch.tensor(0.0)  # unused during SSL
         # # For supervised: label = torch.FloatTensor(self.labels[idx])
 
-        # return volume, label
+        return volume, label
 
-        raise NotImplementedError("Fill in __getitem__ with your slice loading logic")
+        # raise NotImplementedError("Fill in __getitem__ with your slice loading logic")
